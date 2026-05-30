@@ -35,7 +35,9 @@ from typing import Any, Final
 # which functions are intended for use outside this module.
 
 __all__ = [
+    "PROFIT_MARGIN_DEFAULT",
     "TAX_RATE_DEFAULT",
+    "compute_profit_estimate",
     "compute_tax_amount",
     "compute_total_price",
     "enrich_message",
@@ -46,6 +48,9 @@ __all__ = [
 
 # Fallback tax rate used when a region is not found in the lookup table.
 TAX_RATE_DEFAULT: Final[float] = 0.08
+
+# Estimated profit margin applied to subtotal (pre-tax revenue).
+PROFIT_MARGIN_DEFAULT: Final[float] = 0.30
 
 # === CONFIGURE LOGGER ONCE PER PYTHON FILE (MODULE) ===
 
@@ -114,6 +119,21 @@ def enrich_message(
         "tax_amount": tax_amount,
         "total": total,
     }
+
+
+def compute_profit_estimate(
+    subtotal: float, margin: float = PROFIT_MARGIN_DEFAULT
+) -> float:
+    """Compute estimated profit from subtotal using a fixed margin rate.
+
+    Arguments:
+        subtotal: Pre-tax revenue for the order.
+        margin: Profit margin as a decimal (default 30%).
+
+    Returns:
+        Estimated profit rounded to 2 decimal places.
+    """
+    return round(subtotal * margin, 2)
 
 
 def get_tax_rate(region_id: str, region_lookup: dict[str, float]) -> float:
