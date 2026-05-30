@@ -87,3 +87,153 @@ The `compute_profit_estimate` function was added to `derived_fields.py` followin
 same pattern as `compute_tax_amount`, keeping the math isolated and testable.
 Tracking profit instead of revenue also shows how a small change to one `stats.update()`
 call can shift the entire analytics focus of the consumer.
+
+---
+
+## Custom Project
+
+### Dataset
+
+The producer reads from `data/sales.csv`, which contains 178 online course sales records.
+
+Each record includes:
+
+- **Required fields:** `order_id`, `datetime`, `region_id`, `currency_code`, `product_id`,
+  `unit_price`, `quantity`, `is_online`, `customer_id`, `payment_method`
+- **Optional fields:** `is_new_customer`, `device_type`, `referral_source`,
+  `discount_code`, `customer_note`
+
+The original sales dataset was used without modification.
+
+Two reference datasets were used for validation and enrichment:
+
+- `data/regions.csv` — maps `region_id` to tax rate and currency
+- `data/products.csv` — maps `product_id` to product name, category, and price
+
+### Data Contract
+
+Rules enforced by `data_contract_case.py`:
+
+**Required fields** (message is rejected if any are missing):
+`order_id`, `datetime`, `region_id`, `currency_code`, `product_id`,
+`unit_price`, `quantity`, `is_online`, `customer_id`, `payment_method`
+
+**Optional fields** (present in some records, not required):
+`is_new_customer`, `device_type`, `referral_source`, `discount_code`, `customer_note`
+
+**Allowed values:**
+
+- `payment_method` — `credit_card`, `paypal`, `apple_pay`, `gift_card`
+- `device_type` — `mobile`, `desktop`, `tablet`
+- `referral_source` — `organic`, `paid_search`, `email`, `social`
+- `currency_code` — `USD`, `CAD`, `MXN`
+
+A message is **valid** when all required fields are present and non-empty.
+A message is **invalid** when any required field is missing or empty.
+
+### Kafka Messages
+
+The producer reads each row from `sales.csv`, validates it against the required fields,
+and sends valid rows as JSON-encoded messages to the Kafka topic.
+
+- **Kafka topic:** `streaming-03-analytics-case`
+- **Message key:** `region_id` (used to route messages by region)
+- **Message fields:** all required and optional fields from `sales.csv`
+- The producer was used unchanged from the case example
+
+### Consumer Validation
+
+The consumer (`kafka_consumer_venkat.py`) validates each incoming message by calling
+`validate_required_fields()` from the data contract.
+
+**When a message is accepted:**
+The consumer enriches it with derived fields, writes the full row to `teja_consumed_sales.csv`,
+and updates running profit statistics.
+
+**When a message is rejected:**
+The consumer logs a warning with the `order_id` and a count of skipped messages,
+then moves on to the next message without writing to the CSV.
+
+Validation protects downstream results by ensuring only complete records contribute
+to the derived fields and running statistics.
+
+### Data Engineering and Enrichment
+
+Three derived fields are computed from raw message fields after validation passes:
+
+| Derived Field | Source Fields | Calculation |
+| --- | --- | --- |
+| `subtotal` | `unit_price`, `quantity` | `unit_price × quantity` |
+| `tax_amount` | `subtotal`, `tax_rate` from `regions.csv` | `subtotal × tax_rate` |
+| `total` | `subtotal`, `tax_amount` | `subtotal + tax_amount` |
+
+Two additional derived fields were added in Phase 5:
+
+| Derived Field | Source | Calculation |
+| --- | --- | --- |
+| `category` | `products.csv` via `product_id` | lookup — e.g., "Streaming", "Data Analytics" |
+| `profit_estimate` | `subtotal` | `subtotal × 0.30` (30% margin) |
+
+`compute_profit_estimate()` was added to `derived_fields.py` following the same
+pattern as `compute_tax_amount()`.
+
+### Streaming Analytics
+
+After each accepted message, running statistics are updated on `profit_estimate`
+(changed from `total` in Phase 4).
+
+The consumer tracks and logs after every message:
+
+- **Total** estimated profit accumulated so far
+- **Average** profit per order
+- **Minimum** profit seen in any single order
+- **Maximum** profit seen in any single order
+
+As more messages arrived, the running average stabilized and the min/max spread
+reflected the range between small single-unit orders and larger multi-unit orders.
+
+### Experiments
+
+**Phase 4 — Change which field is summarized:**
+Changed `stats.update(enriched["total"])` to `stats.update(profit_estimate)`.
+This shifts the running statistics from tracking gross revenue (including tax)
+to tracking estimated profit at a 30% margin on pre-tax subtotal.
+
+**Phase 5 — Add product category enrichment:**
+Added `products.csv` as a second reference lookup. Each message is now enriched
+with the product `category` (e.g., "Streaming", "Databases") looked up by `product_id`.
+`profit_estimate` is also computed and written to the output CSV alongside `category`,
+making it possible to compare profit contribution across course types.
+
+### Results
+
+- **Messages produced:** 3 per producer run (configured by `PRODUCER_MESSAGE_COUNT=3`)
+- **Messages consumed:** 18 rows in `teja_consumed_sales.csv` (3 producer runs × 6 unique records)
+- **Messages accepted:** 18 (all passed required-field validation)
+- **Messages rejected:** 0
+- **Output CSV:** `data/output/teja_consumed_sales.csv` — includes all original fields
+  plus `subtotal`, `tax_amount`, `total`, `category`, `profit_estimate`,
+  and Kafka metadata (`_kafka_key`, `_kafka_partition`, `_kafka_offset`)
+- **Logs:** each accepted message logged `category`, `subtotal`, `profit_estimate`,
+  and the running profit stats (total, average, min, max)
+
+### Interpretation
+
+The validation step confirmed that all 18 consumed records were well-formed —
+no required fields were missing in the sales dataset.
+This highlights that validation is most valuable when data comes from untrusted
+or heterogeneous sources; in production, even a small percentage of malformed
+messages could silently corrupt downstream aggregations without it.
+
+Enriching messages with `category` showed that Streaming course orders generate
+the highest per-order profit estimate (up to $53.99 for a 3-unit order),
+while Data Visualization orders generate the lowest ($12.00 for a single unit).
+This kind of category-level insight is not visible from revenue totals alone.
+
+Tracking `profit_estimate` instead of `total` also showed how a single line change
+in `stats.update()` completely shifts what the analytics pipeline reports —
+the architecture makes it easy to pivot the measurement without restructuring the consumer.
+
+For a business, running profit estimates per message as they arrive means course
+sales trends by category are visible in near-real-time, without waiting for a
+nightly batch report.
